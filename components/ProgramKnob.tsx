@@ -80,7 +80,11 @@ export default function ProgramKnob({
     if (!isDragging || disabled) return;
     
     const currentAngle = getAngleFromEvent(clientX, clientY);
-    const angleDelta = currentAngle - startAngle;
+    let angleDelta = currentAngle - startAngle;
+    // Normalize delta to [-180, +180] so crossing the 359°↔0° wrap point
+    // (the top of the circle) does not cause a 358° jump the wrong way.
+    if (angleDelta > 180) angleDelta -= 360;
+    else if (angleDelta < -180) angleDelta += 360;
     const newRotation = startRotation + angleDelta;
     
     setRotation(newRotation);
@@ -144,13 +148,11 @@ export default function ProgramKnob({
   };
 
   const handleTouchStart = (e: React.TouchEvent) => {
-    e.preventDefault();
     const touch = e.touches[0];
     handleStart(touch.clientX, touch.clientY);
   };
 
   const handleTouchMove = (e: React.TouchEvent) => {
-    e.preventDefault();
     const touch = e.touches[0];
     handleMove(touch.clientX, touch.clientY);
   };
@@ -159,7 +161,10 @@ export default function ProgramKnob({
     handleEnd();
   };
 
-  // Add global event listeners for drag
+  // Add global event listeners for drag (mouse + touch)
+  // Global touch listeners are critical on mobile: once the finger leaves
+  // the knob element the React element handlers stop firing, and without
+  // window-level listeners the drag freezes.
   useEffect(() => {
     if (isDragging) {
       const handleGlobalMouseMove = (e: MouseEvent) => {
@@ -169,13 +174,31 @@ export default function ProgramKnob({
       const handleGlobalMouseUp = () => {
         handleEnd();
       };
+
+      const handleGlobalTouchMove = (e: TouchEvent) => {
+        // Cancel scroll/zoom/refresh gestures only while actively dragging
+        // so the page scrolls normally when the knob isn't being used.
+        if (e.cancelable) e.preventDefault();
+        const touch = e.touches[0];
+        if (touch) handleMove(touch.clientX, touch.clientY);
+      };
+      
+      const handleGlobalTouchEnd = () => {
+        handleEnd();
+      };
       
       window.addEventListener('mousemove', handleGlobalMouseMove);
       window.addEventListener('mouseup', handleGlobalMouseUp);
+      window.addEventListener('touchmove', handleGlobalTouchMove, { passive: false, capture: true });
+      window.addEventListener('touchend', handleGlobalTouchEnd, { passive: true, capture: true });
+      window.addEventListener('touchcancel', handleGlobalTouchEnd, { passive: true, capture: true });
       
       return () => {
         window.removeEventListener('mousemove', handleGlobalMouseMove);
         window.removeEventListener('mouseup', handleGlobalMouseUp);
+        window.removeEventListener('touchmove', handleGlobalTouchMove, { capture: true });
+        window.removeEventListener('touchend', handleGlobalTouchEnd, { capture: true });
+        window.removeEventListener('touchcancel', handleGlobalTouchEnd, { capture: true });
       };
     }
   }, [isDragging, handleMove, handleEnd]);
@@ -204,7 +227,20 @@ export default function ProgramKnob({
       aria-valuemax={programs.length - 1}
       aria-valuenow={selectedIndex}
     >
-      {/* Programs positioned around the knob */}
+      {/* Full-cover grabber overlay — the real touch/mouse target.
+           Covers the entire container so you can grab anywhere to rotate.
+           touch-action:none prevents the browser from stealing scroll/zoom
+           gestures anywhere on the ring area. */}
+      <div
+        className="absolute inset-0 z-20 rounded-full select-none"
+        style={{ touchAction: 'none' }}
+        onMouseDown={handleMouseDown}
+        onTouchStart={handleTouchStart}
+        aria-hidden={disabled}
+      />
+
+      {/* Programs positioned around the knob (z-30 so taps still work
+           over the grabber overlay on those tiny icon hit-areas). */}
       {programs.map((program, index) => {
         // Calculate angle so that index 0 is at the top (aligned with indicator)
         // Using -90 to start from top in CSS coordinate system
@@ -221,8 +257,9 @@ export default function ProgramKnob({
             onClick={() => handleProgramClick(index)}
             disabled={disabled}
             className={`
-              absolute transform -translate-x-1/2 -translate-y-1/2
+              z-30 absolute transform -translate-x-1/2 -translate-y-1/2
               text-xs font-medium transition-all duration-200
+              min-h-[40px] min-w-[40px] flex items-center justify-center text-2xl
               ${isSelected 
                 ? 'text-cyan-400 scale-110 font-bold' 
                 : 'text-gray-400 hover:text-gray-300'
@@ -232,6 +269,8 @@ export default function ProgramKnob({
             style={{
               left: `${x}%`,
               top: `${y}%`,
+              WebkitTapHighlightColor: 'transparent',
+              touchAction: 'manipulation',
             }}
             aria-label={`Select ${program.name} program`}
             aria-pressed={isSelected}
@@ -241,24 +280,23 @@ export default function ProgramKnob({
         );
       })}
 
-      {/* Main knob */}
+      {/* Main knob visual only — no direct listeners. All touches go
+           through the full-cover grabber above so you can grab the dead
+           margin around the circle on narrow phones. */}
       <div
         ref={knobRef}
         className={`
+          pointer-events-none
           absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2
-          w-64 h-64 rounded-full
+          w-full max-w-[256px] aspect-square h-auto rounded-full
           bg-gradient-to-br from-gray-800 to-gray-900
           border-4 border-gray-700 shadow-2xl
-          ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}
-          ${disabled ? 'opacity-50 cursor-not-allowed' : ''}
+          ${disabled ? 'opacity-50' : ''}
           ${isDragging ? '' : 'transition-transform duration-150 ease-out'}
         `}
         style={{
           transform: `rotate(${rotation}deg)`,
         }}
-        onMouseDown={handleMouseDown}
-        onTouchStart={handleTouchStart}
-        aria-hidden="true"
       >
         {/* Knob texture/ridges */}
         <div className="absolute inset-0 rounded-full overflow-hidden">
@@ -293,14 +331,17 @@ export default function ProgramKnob({
           }}
         />
 
-        {/* Center display */}
+        {/* Center display — counter-rotated so text stays upright */}
         <div 
-          className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2
-          w-32 h-32 rounded-full bg-gray-900 border-2 border-gray-700
+          className="absolute top-1/2 left-1/2 transform translate-x-[-50%] translate-y-[-50%] rotate-[var(--counter)]
+          w-1/2 max-w-[128px] aspect-square rounded-full bg-gray-900 border-2 border-gray-700
           flex items-center justify-center shadow-inner"
           style={{
-            transform: `translate(-50%, -50%) rotate(${-rotation}deg)`,
-          }}
+            // Use CSS variable so the counter-rotate is applied *after* the
+            // knob's rotate above, regardless of the translate-xy shorthand
+            // above it in className.
+            ['--counter' as any]: `${-rotation}deg`,
+          } as React.CSSProperties}
         >
           <div className="text-center">
             <div className="text-2xl mb-1">{selectedProgram.icon}</div>
