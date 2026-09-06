@@ -39,6 +39,87 @@ export default function Home() {
   const [hapticEnabled, setHapticEnabled] = useState(true);
   const [darkMode, setDarkMode] = useState(true);
 
+  const sendNotification = (programName: string) => {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification('Washing Complete', {
+        body: `Your ${programName} cycle has finished.`,
+        icon: '/icon-192x192.png',
+        badge: '/icon-192x192.png',
+      });
+    }
+  };
+
+  const scheduleScheduledNotification = async (programName: string, endTime: number, tag: string) => {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    if (!('serviceWorker' in navigator)) return;
+    const winAny = window as any;
+    if (typeof winAny.TimestampTrigger !== 'function') return;
+    try {
+      const registration = await navigator.serviceWorker.ready;
+      await registration.showNotification('Washing Complete', {
+        body: `Your ${programName} cycle has finished.`,
+        icon: '/icon-192x192.png',
+        badge: '/icon-192x192.png',
+        tag,
+        ...({ showTrigger: new winAny.TimestampTrigger(endTime) } as any),
+      } as any);
+    } catch (err) {
+      console.warn('Failed to schedule notification trigger:', err);
+    }
+  };
+
+  const cancelScheduledNotification = async (tag: string) => {
+    if (!('serviceWorker' in navigator)) return;
+    try {
+      const registration = await navigator.serviceWorker.ready;
+      const notifications = await registration.getNotifications({ tag, includeTriggered: true } as any);
+      notifications.forEach((n: Notification) => n.close());
+    } catch (err) {
+      console.warn('Failed to cancel scheduled notification:', err);
+    }
+  };
+
+  const handleComplete = useCallback((completedTimerData: TimerData) => {
+    const completedData = { ...completedTimerData, state: 'finished' as TimerState };
+    setTimerData(completedData);
+    saveTimerData(completedData);
+
+    const program = getProgramById(completedTimerData.programId);
+    if (program) {
+      saveHistoryEntry({
+        id: Date.now().toString(),
+        programId: program.id,
+        programName: program.name,
+        duration: program.duration,
+        completedAt: completedTimerData.endTime,
+      });
+    } else if (completedTimerData.programId === 'custom') {
+      const duration = Math.floor((completedTimerData.endTime - completedTimerData.startTime) / (60 * 1000));
+      saveHistoryEntry({
+        id: Date.now().toString(),
+        programId: 'custom',
+        programName: 'Custom',
+        duration,
+        completedAt: completedTimerData.endTime,
+      });
+    }
+
+    clearTimerData();
+
+    const tag = `washing-complete-${completedTimerData.startTime}`;
+    cancelScheduledNotification(tag);
+
+    const programName = program?.name || 'Wash cycle';
+    sendNotification(programName);
+
+    if (soundEnabled) {
+      soundManager.playComplete();
+    }
+    if (hapticEnabled) {
+      hapticFeedback.success();
+    }
+  }, [soundEnabled, hapticEnabled]);
+
   // Check for reduced motion preference
   useEffect(() => {
     const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -82,8 +163,7 @@ export default function Home() {
     const savedData = loadTimerData();
     if (savedData) {
       setTimerData(savedData);
-      
-      // Check if it's a custom timer
+
       if (savedData.programId === 'custom') {
         setIsCustomTimer(true);
         const customProgram = {
@@ -100,14 +180,14 @@ export default function Home() {
           setSelectedProgram(program);
         }
       }
-      
-      // Check if timer has completed while app was closed
+
+      const tag = `washing-complete-${savedData.startTime}`;
+
       if (checkTimerCompletion(savedData)) {
         const completedData = { ...savedData, state: 'finished' as TimerState };
         setTimerData(completedData);
         saveTimerData(completedData);
-        
-        // Save to history
+
         const program = getProgramById(savedData.programId);
         if (program) {
           saveHistoryEntry({
@@ -118,18 +198,26 @@ export default function Home() {
             completedAt: savedData.endTime,
           });
         } else if (savedData.programId === 'custom') {
-          // Handle custom timer history
           const duration = Math.floor((savedData.endTime - savedData.startTime) / (60 * 1000));
           saveHistoryEntry({
             id: Date.now().toString(),
             programId: 'custom',
             programName: 'Custom',
-            duration: duration,
+            duration,
             completedAt: savedData.endTime,
           });
         }
-        
+
         clearTimerData();
+        cancelScheduledNotification(tag);
+      } else if (savedData.state === 'running') {
+        const program = getProgramById(savedData.programId);
+        const programName = savedData.programId === 'custom'
+          ? (program as any)?.name || 'Custom'
+          : program?.name || 'Wash cycle';
+        scheduleScheduledNotification(programName, savedData.endTime, tag);
+      } else {
+        cancelScheduledNotification(tag);
       }
     }
   }, []);
@@ -138,50 +226,46 @@ export default function Home() {
   useEffect(() => {
     if (!timerData || timerData.state === 'finished') return;
 
-    const interval = setInterval(() => {
+    const tick = () => {
+      if (timerData.state !== 'running') return;
+      const remaining = calculateRemainingTime(timerData);
+      setRemainingTime(remaining);
+
+      const { stageIndex } = calculateCurrentStage(timerData);
+      setCurrentStageIndex(stageIndex);
+
+      if (remaining <= 0) {
+        handleComplete(timerData);
+      }
+    };
+
+    const interval = setInterval(tick, 1000);
+
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
       if (timerData.state === 'running') {
         const remaining = calculateRemainingTime(timerData);
         setRemainingTime(remaining);
-        
         const { stageIndex } = calculateCurrentStage(timerData);
         setCurrentStageIndex(stageIndex);
-
-        // Check for completion
         if (remaining <= 0) {
-          const completedData = { ...timerData, state: 'finished' as TimerState };
-          setTimerData(completedData);
-          saveTimerData(completedData);
-          
-          // Save to history
-          const program = getProgramById(timerData.programId);
-          if (program) {
-            saveHistoryEntry({
-              id: Date.now().toString(),
-              programId: program.id,
-              programName: program.name,
-              duration: program.duration,
-              completedAt: timerData.endTime,
-            });
-          }
-          
-          clearTimerData();
-          
-          // Send notification
-          sendNotification(program?.name || 'Wash cycle');
-          
-          // Sound and haptic feedback for completion
-          if (soundEnabled) {
-            soundManager.playComplete();
-          }
-          if (hapticEnabled) {
-            hapticFeedback.success();
-          }
+          handleComplete(timerData);
         }
+      } else if (timerData.state === 'paused') {
+        const remaining = calculateRemainingTime(timerData);
+        setRemainingTime(remaining);
+        const { stageIndex } = calculateCurrentStage(timerData);
+        setCurrentStageIndex(stageIndex);
       }
-    }, 1000, [timerData, soundEnabled, hapticEnabled]);
+    };
 
-    return () => clearInterval(interval);
-  }, [timerData, soundEnabled, hapticEnabled]);
+    document.addEventListener('visibilitychange', onVisible);
+
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [timerData, handleComplete]);
 
   // Request notification permission
   useEffect(() => {
@@ -190,24 +274,16 @@ export default function Home() {
     }
   }, []);
 
-  const sendNotification = (programName: string) => {
-    if ('Notification' in window && Notification.permission === 'granted') {
-      new Notification('Washing Complete', {
-        body: `Your ${programName} cycle has finished.`,
-        icon: '/icon-192x192.png',
-        badge: '/icon-192x192.png',
-      });
-    }
-  };
-
   const handleStart = useCallback(() => {
     const newTimerData = createTimerData(selectedProgram.id, selectedProgram.duration);
     setTimerData(newTimerData);
     saveTimerData(newTimerData);
     setRemainingTime(selectedProgram.duration * 60 * 1000);
     setCurrentStageIndex(0);
-    
-    // Sound and haptic feedback
+
+    const tag = `washing-complete-${newTimerData.startTime}`;
+    scheduleScheduledNotification(selectedProgram.name, newTimerData.endTime, tag);
+
     if (soundEnabled) {
       soundManager.playStart();
     }
@@ -221,7 +297,10 @@ export default function Home() {
     const pausedData = pauseTimer(timerData);
     setTimerData(pausedData);
     saveTimerData(pausedData);
-    
+
+    const tag = `washing-complete-${timerData.startTime}`;
+    cancelScheduledNotification(tag);
+
     if (soundEnabled) {
       soundManager.playPause();
     }
@@ -235,36 +314,46 @@ export default function Home() {
     const resumedData = resumeTimer(timerData);
     setTimerData(resumedData);
     saveTimerData(resumedData);
-    
+
+    const program = getProgramById(resumedData.programId);
+    const programName = resumedData.programId === 'custom'
+      ? customTimerLabel
+      : program?.name || 'Wash cycle';
+    const tag = `washing-complete-${resumedData.startTime}`;
+    scheduleScheduledNotification(programName, resumedData.endTime, tag);
+
     if (soundEnabled) {
       soundManager.playStart();
     }
     if (hapticEnabled) {
       hapticFeedback.medium();
     }
-  }, [timerData, soundEnabled, hapticEnabled]);
+  }, [timerData, soundEnabled, hapticEnabled, customTimerLabel]);
 
   const handleCancel = useCallback(() => {
+    if (timerData) {
+      const tag = `washing-complete-${timerData.startTime}`;
+      cancelScheduledNotification(tag);
+    }
     cancelTimer();
     setTimerData(null);
     setRemainingTime(0);
     setCurrentStageIndex(0);
-    
+
     if (soundEnabled) {
       soundManager.playCancel();
     }
     if (hapticEnabled) {
       hapticFeedback.error();
     }
-  }, [soundEnabled, hapticEnabled]);
+  }, [timerData, soundEnabled, hapticEnabled]);
 
   const handleCustomTimer = useCallback((hours: number, minutes: number, label: string) => {
     const totalMinutes = hours * 60 + minutes;
     setCustomDuration(totalMinutes);
     setCustomTimerLabel(label);
     setIsCustomTimer(true);
-    
-    // Create a custom program
+
     const customProgram = {
       ...selectedProgram,
       id: 'custom',
@@ -272,14 +361,17 @@ export default function Home() {
       duration: totalMinutes,
       stages: [{ name: 'Custom', duration: totalMinutes }],
     };
-    
+
     setSelectedProgram(customProgram);
     const newTimerData = createTimerData('custom', totalMinutes);
     setTimerData(newTimerData);
     saveTimerData(newTimerData);
     setRemainingTime(totalMinutes * 60 * 1000);
     setCurrentStageIndex(0);
-    
+
+    const tag = `washing-complete-${newTimerData.startTime}`;
+    scheduleScheduledNotification(label, newTimerData.endTime, tag);
+
     if (navigator.vibrate) {
       navigator.vibrate([50, 50, 50]);
     }

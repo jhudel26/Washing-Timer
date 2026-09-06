@@ -33,11 +33,18 @@ export default function ProgramKnob({
 
   // Update rotation when selected program changes externally
   useEffect(() => {
-    // Calculate rotation so the selected program aligns with the top indicator
-    // The indicator is at the top, so we need to rotate the knob so the selected program points to it
-    const targetRotation = -selectedIndex * anglePerProgram;
-    setRotation(targetRotation);
-  }, [selectedIndex, anglePerProgram]);
+    if (isDragging) return;
+    const targetRotation = selectedIndex * anglePerProgram;
+    setRotation((prev) => {
+      const remainder = ((prev % 360) + 360) % 360;
+      const baseTurns = prev - remainder;
+      let candidate = baseTurns + targetRotation;
+      const diff = candidate - prev;
+      if (diff > 180) candidate -= 360;
+      else if (diff < -180) candidate += 360;
+      return candidate;
+    });
+  }, [selectedIndex, anglePerProgram, isDragging]);
 
   const getAngleFromEvent = useCallback((clientX: number, clientY: number): number => {
     if (!containerRef.current) return 0;
@@ -101,19 +108,28 @@ export default function ProgramKnob({
     
     setIsDragging(false);
     
-    // Snap to nearest program
-    const normalizedRotation = ((rotation % 360) + 360) % 360;
-    const programIndex = Math.round(normalizedRotation / anglePerProgram) % programs.length;
-    const targetRotation = -programIndex * anglePerProgram;
+    // Snap to nearest program, taking the shortest angular path
+    const remainder = ((rotation % 360) + 360) % 360;
+    const baseTurns = rotation - remainder;
+    const programIndex = Math.round(remainder / anglePerProgram) % programs.length;
+    let targetRotation = baseTurns + programIndex * anglePerProgram;
+    const diff = targetRotation - rotation;
+    if (diff > 180) targetRotation -= 360;
+    else if (diff < -180) targetRotation += 360;
     
     setRotation(targetRotation);
     
-    // Ensure correct program is selected
     const targetProgram = programs[programIndex];
-    if (targetProgram) {
+    if (targetProgram && targetProgram.id !== selectedProgram.id) {
       onProgramSelect(targetProgram);
+      if (soundEnabled) {
+        soundManager.playDialClick();
+      }
+      if (hapticEnabled) {
+        hapticFeedback.light();
+      }
     }
-  }, [isDragging, rotation, anglePerProgram, programs, onProgramSelect]);
+  }, [isDragging, rotation, anglePerProgram, programs, selectedProgram, onProgramSelect, soundEnabled, hapticEnabled]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     handleStart(e.clientX, e.clientY);
@@ -235,7 +251,7 @@ export default function ProgramKnob({
           border-4 border-gray-700 shadow-2xl
           ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}
           ${disabled ? 'opacity-50 cursor-not-allowed' : ''}
-          transition-transform duration-75 ease-out
+          ${isDragging ? '' : 'transition-transform duration-150 ease-out'}
         `}
         style={{
           transform: `rotate(${rotation}deg)`,

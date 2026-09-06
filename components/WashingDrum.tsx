@@ -18,8 +18,8 @@ export default function WashingDrum({
   const [rotation, setRotation] = useState(0);
   const [direction, setDirection] = useState(1);
   const [waterLevel, setWaterLevel] = useState(0);
-  const animationRef = useRef<number | undefined>();
-  const lastTimeRef = useRef<number | undefined>();
+  const animationRef = useRef<number | undefined>(undefined);
+  const lastTimeRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     if (reducedMotion) {
